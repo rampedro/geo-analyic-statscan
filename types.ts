@@ -56,11 +56,15 @@ export interface MapViewState {
   bearing: number;
 }
 
-export type AIProvider = 'gemini' | 'ollama';
+export interface VisualSettings {
+  glyphSizeScale: number;
+  opacity: number;
+  strokeWidth: number;
+  darkMode: boolean;
+}
 
 export interface AIConfig {
-  provider: AIProvider;
-  geminiKey?: string;
+  provider: 'gemini' | 'ollama';
   ollamaUrl?: string;
   ollamaModel?: string;
 }

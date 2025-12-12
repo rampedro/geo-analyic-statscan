@@ -1,26 +1,31 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GeoPoint, MapViewState, DataProduct, LODLevel } from './types';
+import { GeoPoint, MapViewState, DataProduct, LODLevel, VisualSettings } from './types';
 import { INITIAL_VIEW_STATE } from './constants';
-import { aiService } from './services/aiService';
 import { statCanService } from './services/statCanService';
 import MapLayer from './components/MapLayer';
-import AnalysisPanel from './components/AnalysisPanel';
 import ComparisonChart from './components/ComparisonChart';
 import DataDiscoveryPanel from './components/DataDiscoveryPanel';
+import SettingsPanel from './components/SettingsPanel';
 import { WebMercatorViewport } from '@deck.gl/core';
 
 const App: React.FC = () => {
   // State
   const [baseShapeData, setBaseShapeData] = useState<any>({ type: "FeatureCollection", features: [] });
-  
-  // CACHE: Stores geometry for each level independently (PROVINCE, CMA, CD, etc.)
   const [layerCache, setLayerCache] = useState<Record<string, any>>({});
-  
   const [detailedPoints, setDetailedPoints] = useState<GeoPoint[]>([]);
   
   const [viewState, setViewState] = useState<MapViewState>(INITIAL_VIEW_STATE);
   const [lod, setLod] = useState<LODLevel>('PROVINCE');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  // VISUAL SETTINGS
+  const [visualSettings, setVisualSettings] = useState<VisualSettings>({
+      glyphSizeScale: 1.0,
+      opacity: 0.8,
+      strokeWidth: 2.0,
+      darkMode: true
+  });
+  const [showSettings, setShowSettings] = useState(false);
 
   // MULTIVARIABLE STATE
   const [activeProducts, setActiveProducts] = useState<DataProduct[]>([
@@ -28,12 +33,10 @@ const App: React.FC = () => {
   ]);
   
   const [showDiscovery, setShowDiscovery] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [aiInsight, setAiInsight] = useState<string>("");
-  const [analysisContext, setAnalysisContext] = useState<string>("Canada");
   const [isLoading, setIsLoading] = useState(false);
   const [showLoadButton, setShowLoadButton] = useState(false);
   const [isConnectedToWDS, setIsConnectedToWDS] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Initial Load (Base Layer)
   useEffect(() => {
@@ -47,7 +50,6 @@ const App: React.FC = () => {
     setIsLoading(true);
     const shapes = await statCanService.fetchCanadaGeoJSON();
     setBaseShapeData(shapes);
-    // Initialize cache with base layer
     setLayerCache(prev => ({ ...prev, 'PROVINCE': shapes }));
     setIsLoading(false);
   };
@@ -57,7 +59,6 @@ const App: React.FC = () => {
     let nextLod: LODLevel = 'PROVINCE';
     const z = viewState.zoom;
     
-    // Strict Hierarchical Thresholds
     if (z < 4) nextLod = 'PROVINCE';
     else if (z >= 4 && z < 6) nextLod = 'CMA';
     else if (z >= 6 && z < 8) nextLod = 'CD';
@@ -67,9 +68,6 @@ const App: React.FC = () => {
 
     if (nextLod !== lod) {
         setLod(nextLod);
-        // We DO NOT clear detailedPoints or layerCache here. 
-        // We keep them to allow the "stacking" visual effect.
-        // We only clear points if we want to reset the "data" view, but let's keep them for context too.
     }
 
     if (z > 4) {
@@ -81,58 +79,68 @@ const App: React.FC = () => {
 
   const handleLoadArea = async () => {
     setIsLoading(true);
+    setLoadError(null);
+    
     const viewport = new WebMercatorViewport(viewState);
     const bounds = viewport.getBounds(); 
     const boundObj = { west: bounds[0], south: bounds[1], east: bounds[2], north: bounds[3] };
     
     const targetLevel = lod;
 
-    // 1. Fetch Baselines
-    const baselines = await statCanService.fetchBaselines(activeProducts);
+    try {
+        // 1. Fetch Baselines
+        const baselines = await statCanService.fetchBaselines(activeProducts);
 
-    // 2. Start Streaming
-    const stream = statCanService.streamShapes(targetLevel, boundObj);
-    
-    // 3. Accumulate features for THIS level
-    let currentLevelFeatures: any[] = layerCache[targetLevel]?.features || [];
-    // We filter out existing IDs to avoid duplicates if loading same area
-    const existingIds = new Set(currentLevelFeatures.map((f: any) => f.properties.id || f.properties.DAUID));
-    
-    let newPoints: GeoPoint[] = [];
+        // 2. Start Streaming
+        // NOTE: We do not depend on previous layers being loaded.
+        const stream = statCanService.streamShapes(targetLevel, boundObj);
+        
+        let currentLevelFeatures: any[] = layerCache[targetLevel]?.features || [];
+        const existingIds = new Set(currentLevelFeatures.map((f: any) => f.properties.id || f.properties.DAUID));
+        
+        let chunkCount = 0;
 
-    // 4. Consume chunks
-    for await (const chunkFeatures of stream) {
-        const uniqueFeatures = chunkFeatures.filter((f:any) => {
-            const id = f.properties.id || f.properties.DAUID || f.properties.CFSAUID;
-            if(existingIds.has(id)) return false;
-            existingIds.add(id);
-            return true;
-        });
+        for await (const chunkFeatures of stream) {
+            const uniqueFeatures = chunkFeatures.filter((f:any) => {
+                // Ensure robust ID checking for various GeoJSON standards
+                const id = f.properties.id || f.properties.DAUID || f.properties.CFSAUID || f.properties.CCSUID || f.properties.CDUID;
+                if (!id) return true; // Include if no ID, but generate one later
+                if (existingIds.has(id)) return false;
+                existingIds.add(id);
+                return true;
+            });
 
-        if (uniqueFeatures.length === 0) continue;
+            if (uniqueFeatures.length === 0) continue;
+            chunkCount += uniqueFeatures.length;
 
-        // Generate metrics
-        const chunkPoints: GeoPoint[] = [];
-        for (const feature of uniqueFeatures) {
-             const p = await statCanService.enrichFeature(feature, activeProducts, targetLevel, baselines);
-             if (p) chunkPoints.push(p);
+            const chunkPoints: GeoPoint[] = [];
+            for (const feature of uniqueFeatures) {
+                const p = await statCanService.enrichFeature(feature, activeProducts, targetLevel, baselines);
+                if (p) chunkPoints.push(p);
+            }
+
+            currentLevelFeatures = [...currentLevelFeatures, ...uniqueFeatures];
+            
+            // Incrementally update React State for visual feedback
+            setLayerCache(prev => ({
+                ...prev,
+                [targetLevel]: { type: "FeatureCollection", features: currentLevelFeatures }
+            }));
+            
+            setDetailedPoints(prev => [...prev, ...chunkPoints]);
         }
 
-        currentLevelFeatures = [...currentLevelFeatures, ...uniqueFeatures];
-        newPoints = [...newPoints, ...chunkPoints];
+        if (chunkCount === 0 && currentLevelFeatures.length === 0) {
+           setLoadError(`No data found for ${targetLevel} in this area.`);
+        }
 
-        // Update Cache and Points incrementally
-        setLayerCache(prev => ({
-            ...prev,
-            [targetLevel]: { type: "FeatureCollection", features: currentLevelFeatures }
-        }));
-        
-        setDetailedPoints(prev => [...prev, ...chunkPoints]);
+    } catch (e) {
+        console.error("Loading failed", e);
+        setLoadError("Failed to load data stream.");
+    } finally {
+        setIsLoading(false);
+        setShowLoadButton(false); 
     }
-    
-    setAnalysisContext(`Regional Scan (${targetLevel})`);
-    setIsLoading(false);
-    setShowLoadButton(false); 
   };
 
   const handleProductsChange = async (products: DataProduct[]) => {
@@ -141,9 +149,6 @@ const App: React.FC = () => {
         setDetailedPoints([]);
         return;
     }
-    // If we have loaded shapes, we need to re-calculate points/metrics for them
-    // For simplicity in this demo, we just clear points and ask user to reload or rely on next load
-    // A robust solution would re-run enrichFeature on all cached features.
     setDetailedPoints([]); 
     if (viewState.zoom > 4) handleLoadArea();
   };
@@ -165,17 +170,6 @@ const App: React.FC = () => {
        setSelectedIds([id]);
     }
   };
-
-  const handleAnalyze = useCallback(async () => {
-    setIsAnalyzing(true);
-    const targetData = selectedIds.length > 0 ? detailedPoints.filter(d => selectedIds.includes(d.id)) : detailedPoints;
-    const primaryProduct = activeProducts[0]; 
-    if (!primaryProduct) { setIsAnalyzing(false); return; }
-
-    const result = await aiService.analyzeRegion(targetData, primaryProduct, analysisContext);
-    setAiInsight(result);
-    setIsAnalyzing(false);
-  }, [detailedPoints, activeProducts, analysisContext, selectedIds]);
 
   const getLoadButtonText = () => {
       switch(lod) {
@@ -200,8 +194,8 @@ const App: React.FC = () => {
           onHover={() => {}}
           onClick={handleClick}
           activeProducts={activeProducts}
-          dimensions={2} 
           selectedIds={selectedIds}
+          settings={visualSettings}
         />
         
         {/* Controls Overlay */}
@@ -226,7 +220,16 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {/* Header Bar */}
         <div className="absolute top-4 left-4 z-10 flex gap-2">
+          {/* Settings Toggle */}
+          <button 
+             onClick={() => setShowSettings(!showSettings)}
+             className="bg-gray-900/90 backdrop-blur-md p-3 rounded-2xl border border-gray-700 shadow-xl hover:bg-gray-800 transition-colors text-gray-400"
+          >
+             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+          </button>
+
           <div className="bg-gray-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-gray-700 shadow-xl flex items-center gap-3 pr-4 cursor-pointer hover:bg-gray-800 transition-colors"
                onClick={() => setShowDiscovery(true)}>
              <div className="bg-gray-800 p-2 rounded-xl">
@@ -246,11 +249,21 @@ const App: React.FC = () => {
           </div>
         </div>
 
+        {showSettings && (
+            <SettingsPanel settings={visualSettings} onUpdate={setVisualSettings} onClose={() => setShowSettings(false)} />
+        )}
+
         {isLoading && (
           <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 bg-gray-900/80 backdrop-blur px-4 py-2 rounded-full border border-primary/30 text-primary text-xs flex items-center gap-2">
             <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
             Streaming {lod} data...
           </div>
+        )}
+        
+        {loadError && (
+            <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 bg-red-900/90 backdrop-blur px-4 py-2 rounded-lg border border-red-500/30 text-white text-xs">
+                {loadError}
+            </div>
         )}
         
         {showDiscovery && (
@@ -267,14 +280,6 @@ const App: React.FC = () => {
             <ComparisonChart data={detailedPoints} color={[200,200,200]} unit="Index" lod={lod} selectedIds={selectedIds} />
         </div>
       </div>
-
-      <AnalysisPanel 
-        isLoading={isAnalyzing}
-        content={aiInsight}
-        onAnalyze={handleAnalyze}
-        canAnalyze={detailedPoints.length > 0}
-        city={analysisContext}
-      />
     </div>
   );
 };

@@ -4,20 +4,20 @@ import DeckGL from '@deck.gl/react';
 import { GeoJsonLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
 import { PickingInfo } from '@deck.gl/core';
 import * as d3 from 'd3';
-import { GeoPoint, MapViewState, LODLevel, DataProduct } from '../types';
+import { GeoPoint, MapViewState, LODLevel, DataProduct, VisualSettings } from '../types';
 import { MAP_STYLE } from '../constants';
 
 interface MapLayerProps {
   viewState: MapViewState;
   onViewStateChange: (view: any) => void;
   data: GeoPoint[];
-  layerCache: Record<string, any>; // Stores all loaded hierarchies
+  layerCache: Record<string, any>; 
   lod: LODLevel;
   onHover: (info: PickingInfo) => void;
   onClick: (info: PickingInfo, event: any) => void;
   activeProducts: DataProduct[];
-  dimensions: 1 | 2 | 3;
   selectedIds: string[];
+  settings: VisualSettings;
 }
 
 const CATEGORY_COLORS: Record<string, [number, number, number]> = {
@@ -42,10 +42,11 @@ const MapLayer: React.FC<MapLayerProps> = ({
   activeProducts,
   selectedIds,
   onHover,
-  onClick
+  onClick,
+  settings
 }) => {
 
-  // Domain Calculation
+  // Domain Calculation for normalization
   const metricDomains = useMemo(() => {
       const domains: Record<string, {min: number, max: number}> = {};
       activeProducts.forEach(p => {
@@ -59,52 +60,107 @@ const MapLayer: React.FC<MapLayerProps> = ({
   }, [data, activeProducts]);
 
   const getNormVal = (d: GeoPoint, index: number) => {
-      if (!activeProducts[index]) return 0;
+      if (!activeProducts[index]) return 0.5;
       const pid = activeProducts[index].id;
       const val = d.metrics[pid] || 0;
       const domain = metricDomains[pid];
-      return (val - domain.min) / (domain.max - domain.min || 1);
+      const norm = (val - domain.min) / (domain.max - domain.min || 1);
+      return Math.max(0.1, norm); // Ensure at least small visibility
   };
 
-  const getColor = (d: GeoPoint, opacity = 255) => {
-      let r=0, g=0, b=0, count=0;
-      activeProducts.forEach((p, i) => {
-          const intensity = getNormVal(d, i);
-          const c = CATEGORY_COLORS[p.category] || [200,200,200];
-          r += c[0] * (0.5 + intensity);
-          g += c[1] * (0.5 + intensity);
-          b += c[2] * (0.5 + intensity);
-          count += (0.5 + intensity);
+  // --- GLYPH GENERATION ---
+
+  // 1. SCATTERPLOT (1 Variable)
+  const renderScatterplot = () => {
+      return new ScatterplotLayer({
+        id: 'glyph-scatter',
+        data: data,
+        pickable: false,
+        stroked: true,
+        filled: true,
+        radiusScale: 100 * settings.glyphSizeScale,
+        radiusMinPixels: 2,
+        radiusMaxPixels: 50,
+        getPosition: (d: GeoPoint) => [d.lng, d.lat],
+        getRadius: (d: GeoPoint) => 5 + (getNormVal(d, 0) * 10),
+        getFillColor: (d: GeoPoint) => {
+            const c = CATEGORY_COLORS[activeProducts[0].category] || [200,200,200];
+            return [...c, settings.opacity * 255];
+        },
+        getLineColor: (d: GeoPoint) => selectedIds.includes(d.id) ? [255,255,255,255] : [0,0,0,0],
+        getLineWidth: 2,
+        updateTriggers: {
+            getRadius: [activeProducts, settings.glyphSizeScale],
+            getFillColor: [activeProducts, settings.opacity]
+        }
       });
-      if (count === 0) return [100,100,100, opacity];
-      return [r/count, g/count, b/count, opacity];
   };
 
-  // --- ARROW GENERATION (Trends) ---
-  const getArrowPath = (d: GeoPoint) => {
-      let scale = 0.005; // Size of arrow in degrees
-      if (lod === 'DA') scale = 0.002;
-      if (lod === 'FSA') scale = 0.008;
-      if (lod === 'PROVINCE') scale = 1.0;
-
-      const trend = d.trend || 0; 
-      const rotation = trend < 0 ? Math.PI/2 : -Math.PI/2;
-      const x = d.lng;
-      const y = d.lat;
-      const tipX = x + Math.cos(rotation) * scale;
-      const tipY = y + Math.sin(rotation) * scale;
-      const baseX = x - Math.cos(rotation) * scale * 0.5;
-      const baseY = y - Math.sin(rotation) * scale * 0.5;
+  // 2. RADAR / POLYGON EDGES (2+ Variables)
+  // We flatten the data: 1 Point -> N Edges (Paths)
+  // Each edge connects Vertex I to Vertex I+1
+  const renderRadarEdges = () => {
+      const radarData: any[] = [];
+      const numVars = activeProducts.length;
+      const baseRadius = 0.005 * settings.glyphSizeScale * (10 / Math.max(viewState.zoom, 1)); // Adjust radius by zoom roughly
       
-      return [[baseX, baseY], [tipX, tipY]];
+      data.forEach(d => {
+         const cx = d.lng;
+         const cy = d.lat;
+         
+         // Calculate Vertices
+         const vertices: [number, number][] = [];
+         for(let i=0; i<numVars; i++) {
+             const angle = (i / numVars) * Math.PI * 2 - Math.PI / 2; // Start at top
+             const mag = getNormVal(d, i);
+             // Scale radius by magnitude. 
+             // Note: Lat/Lng scaling is approximate here, correct for aspect ratio in production
+             const r = baseRadius * (0.5 + mag * 1.5); 
+             
+             // Simple projection for visual glyphs
+             const vx = cx + Math.cos(angle) * r; 
+             const vy = cy + Math.sin(angle) * r; // Flattened earth approximation
+             vertices.push([vx, vy]);
+         }
+
+         // Create Segments
+         for(let i=0; i<numVars; i++) {
+             const p1 = vertices[i];
+             const p2 = vertices[(i + 1) % numVars]; // Loop back to close
+             
+             // If only 2 variables, we just draw a line between them? 
+             // Or a "flat" polygon. 2 variables = Line. 3 = Triangle. 4 = Square.
+             
+             if (numVars === 2 && i === 1) continue; // For line, just one segment or two overlapping? Let's do 2 colors split.
+             
+             // The Edge Color represents the variable at the START of the edge (or blend)
+             const cat = activeProducts[i].category;
+             const color = CATEGORY_COLORS[cat] || [200,200,200];
+
+             radarData.push({
+                 path: [p1, p2],
+                 color: [...color, settings.opacity * 255],
+                 id: d.id
+             });
+         }
+      });
+
+      return new PathLayer({
+          id: 'glyph-radar-edges',
+          data: radarData,
+          pickable: false,
+          widthMinPixels: settings.strokeWidth,
+          getPath: (d: any) => d.path,
+          getColor: (d: any) => d.color,
+          getWidth: settings.strokeWidth,
+          updateTriggers: {
+              getPath: [activeProducts, viewState.zoom, settings.glyphSizeScale],
+              getColor: [activeProducts, settings.opacity]
+          }
+      });
   };
 
-  // --- DYNAMIC LAYER GENERATION ---
-  
-  // We iterate through the hierarchy levels (Province -> DA)
-  // Each level present in layerCache creates a GeoJsonLayer
-  // Lower levels (Parents) get "Context" styling (Outlines, No Fill)
-  // The Active level (lod) gets "Active" styling (Filled, Highlighted)
+  // --- LAYER ASSEMBLY ---
 
   const stackedLayers = HIERARCHY_ORDER.map((level, index) => {
       const shapeData = layerCache[level];
@@ -113,20 +169,18 @@ const MapLayer: React.FC<MapLayerProps> = ({
       const isActive = level === lod;
       const isParent = HIERARCHY_ORDER.indexOf(lod) > index;
       
-      // If the layer is deeper than current LOD (child), we generally hide it to avoid clutter
-      // unless we want to show everything. For cleanliness, hide children of current view.
       if (!isActive && !isParent) return null; 
 
       return new GeoJsonLayer({
           id: `layer-${level}`,
           data: shapeData,
-          pickable: isActive, // Only active layer is interactive
+          pickable: isActive, 
           stroked: true,
-          filled: isActive,   // Only active layer is filled
+          filled: isActive,
           
           // Context Styling (Parent Layers)
           getLineColor: isParent ? [60, 60, 60, 200] : [100, 116, 139, 200],
-          getLineWidth: isParent ? 3 - (index * 0.5) : 1, // Parents have thicker borders
+          getLineWidth: isParent ? 3 - (index * 0.5) : 1,
           lineWidthMinPixels: isParent ? 2 : 1,
           
           // Active Styling
@@ -134,7 +188,6 @@ const MapLayer: React.FC<MapLayerProps> = ({
           autoHighlight: isActive,
           highlightColor: [6, 182, 212, 50],
           
-          // Ensure correct stacking order (Z-fighting prevention)
           getPolygonOffset: ({layerIndex}) => [0, -index * 100], 
           
           onHover: isActive ? onHover : undefined,
@@ -142,47 +195,19 @@ const MapLayer: React.FC<MapLayerProps> = ({
       });
   }).filter(Boolean);
 
-  const glyphLayers = [
-    // Dots
-    new ScatterplotLayer({
-        id: 'main-glyphs',
-        data: data,
-        pickable: false, 
-        stroked: true,
-        filled: true,
-        radiusScale: 100,
-        radiusMinPixels: 2,
-        radiusMaxPixels: 10,
-        getPosition: (d: GeoPoint) => [d.lng, d.lat],
-        getRadius: (d: GeoPoint) => 5 + (getNormVal(d, 0) * 10),
-        getFillColor: (d: GeoPoint) => getColor(d, 200),
-        getLineColor: (d: GeoPoint) => selectedIds.includes(d.id) ? [255,255,255,255] : [0,0,0,0],
-        getLineWidth: 2,
-        updateTriggers: {
-            getFillColor: [activeProducts, selectedIds],
-        }
-    }),
-    // Arrows
-    new PathLayer({
-        id: 'trend-arrows',
-        data: data,
-        pickable: false,
-        widthMinPixels: 2,
-        getPath: getArrowPath,
-        getColor: (d: GeoPoint) => (d.trend || 0) > 0 ? [74, 222, 128, 200] : [248, 113, 113, 200],
-        getWidth: 3,
-        updateTriggers: {
-            getPath: [activeProducts, lod]
-        }
-    })
-  ];
+  let glyphLayer;
+  if (activeProducts.length <= 1) {
+      glyphLayer = renderScatterplot();
+  } else {
+      glyphLayer = renderRadarEdges();
+  }
 
   return (
     <DeckGL
       viewState={viewState}
       onViewStateChange={e => onViewStateChange(e.viewState)}
       controller={true}
-      layers={[...stackedLayers, ...glyphLayers]}
+      layers={[...stackedLayers, glyphLayer]}
       getTooltip={({object}) => {
         if (!object) return null;
         const props = object.properties || object; 
@@ -191,6 +216,7 @@ const MapLayer: React.FC<MapLayerProps> = ({
         let id = props.id || props.DAUID;
         let name = props.name || props.DAUID || id;
 
+        // Try to find metrics if not directly on object
         if (!metrics && data) {
             const match = data.find(p => p.id === id);
             if (match) {
@@ -201,7 +227,8 @@ const MapLayer: React.FC<MapLayerProps> = ({
 
         if (metrics) {
              let metricHtml = '';
-             const showMetrics = activeProducts.slice(0, 4);
+             // Limit tooltip to first 5 metrics to prevent overflow
+             const showMetrics = activeProducts.slice(0, 5);
              showMetrics.forEach(p => {
                  const val = metrics[p.id];
                  metricHtml += `<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:4px;">

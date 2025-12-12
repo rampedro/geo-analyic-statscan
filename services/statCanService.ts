@@ -123,9 +123,9 @@ export class StatCanService {
   // --- MAP DATA METHODS ---
 
   private isPointInBounds(lat: number, lng: number, bounds: {north: number, south: number, east: number, west: number}): boolean {
-      // Add a 10% buffer to bounds to prevent aggressive popping at edges
-      const latBuf = (bounds.north - bounds.south) * 0.1;
-      const lngBuf = (bounds.east - bounds.west) * 0.1;
+      // Add a 20% buffer to bounds to ensure valid loading even if viewport is slightly off
+      const latBuf = (bounds.north - bounds.south) * 0.2;
+      const lngBuf = (bounds.east - bounds.west) * 0.2;
       return lat <= bounds.north + latBuf && lat >= bounds.south - latBuf && 
              lng <= bounds.east + lngBuf && lng >= bounds.west - lngBuf;
   }
@@ -152,31 +152,44 @@ export class StatCanService {
   // STREAMING GENERATOR: Yields chunks of features to the UI
   async *streamShapes(level: LODLevel, bounds: any): AsyncGenerator<any[], void, unknown> {
     const url = GEOJSON_SOURCES[level];
-    if (!url) return;
+    if (!url) {
+        console.warn(`No URL defined for level ${level}`);
+        return;
+    }
     
     // 1. Get Data (Cached or Network)
     let data = this.cache[url];
     if (!data) {
         try {
             const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             data = await res.json();
             this.cache[url] = data;
-        } catch(e) { console.error(e); return; }
+        } catch(e) { 
+            console.error(`Fetch failed for ${url}`, e); 
+            return; 
+        }
     }
 
     const features = data.features || [];
-    const CHUNK_SIZE = 50; // Process 50 polygons at a time
+    const CHUNK_SIZE = 100; // Increased chunk size for faster loading
     let chunk: any[] = [];
     
     // 2. Iterate and Filter
     for (const f of features) {
+        // Basic geometry check
+        if (!f.geometry) continue;
+        
         const centroid = this.getCentroid(f.geometry);
-        // Only yield if within view bounds
+        
+        // If it's the CCS level, sometimes bounds checking is tricky due to huge shapes.
+        // We ensure we load if the shape is even roughly near.
         if (centroid && this.isPointInBounds(centroid[0], centroid[1], bounds)) {
-             // Ensure ID existence for React keys/logic
+             
+             // Repair IDs if missing
              if (!f.properties.id) {
                  const props = f.properties;
-                 f.properties.id = props.DAUID || props.CFSAUID || props.CCSUID || props.CDUID || props.CMAUID || props.PRUID || `gen-${Math.random()}`;
+                 f.properties.id = props.DAUID || props.CFSAUID || props.CCSUID || props.CDUID || props.CMAUID || props.PRUID || `gen-${Math.random().toString(36).substr(2,9)}`;
              }
              chunk.push(f);
         }
@@ -185,8 +198,8 @@ export class StatCanService {
         if (chunk.length >= CHUNK_SIZE) {
             yield chunk;
             chunk = [];
-            // Artificial tiny delay to let the UI breathe/render between chunks
-            await new Promise(r => setTimeout(r, 10)); 
+            // Reduced delay
+            await new Promise(r => setTimeout(r, 5)); 
         }
     }
     

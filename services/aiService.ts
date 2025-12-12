@@ -5,16 +5,18 @@ export class AIService {
   private ai: GoogleGenAI | null = null;
   private config: AIConfig = {
     provider: 'gemini',
-    geminiKey: process.env.API_KEY || '',
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'llama3'
   };
 
+  constructor() {
+    if (process.env.API_KEY) {
+      this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    }
+  }
+
   updateConfig(newConfig: Partial<AIConfig>) {
     this.config = { ...this.config, ...newConfig };
-    if (this.config.provider === 'gemini' && this.config.geminiKey) {
-      this.ai = new GoogleGenAI({ apiKey: this.config.geminiKey });
-    }
   }
 
   getConfig() {
@@ -58,10 +60,13 @@ export class AIService {
   }
 
   private async callGemini(prompt: string): Promise<string> {
-    if (!this.ai && process.env.API_KEY) {
-      this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!this.ai) {
+      if (process.env.API_KEY) {
+        this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      } else {
+        return "Gemini API Key missing.";
+      }
     }
-    if (!this.ai) return "Gemini API Key missing.";
 
     const response = await this.ai.models.generateContent({
       model: 'gemini-2.5-flash',
