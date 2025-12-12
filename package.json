@@ -1,0 +1,30 @@
+{
+  "name": "statcan-pulse:-ai-powered-geo-analytics",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "@google/genai": "^1.33.0",
+    "recharts": "^3.5.1",
+    "react-map-gl": "^8.1.0",
+    "@deck.gl/layers": "^9.2.5",
+    "@deck.gl/aggregation-layers": "^9.2.5",
+    "@deck.gl/react": "^9.2.5",
+    "@deck.gl/core": "^9.2.5",
+    "d3": "7.8.5",
+    "d3fc": "15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "StatCan Pulse: AI-Powered Geo-Analytics",
+  "description": "A high-performance WebGL dashboard visualizing Canadian social, real-estate, and crime statistics. Features AI-driven insights, trend analysis with vector fields, and comparative hot-spot detection using data modeling.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
