@@ -4,7 +4,6 @@ export enum MetricType {
   Social = 'Social'
 }
 
-// Updated hierarchy to match provided data sources
 export type LODLevel = 'PROVINCE' | 'CMA' | 'CD' | 'CCS' | 'FSA' | 'DA';
 
 export interface GeoHierarchy {
@@ -17,13 +16,13 @@ export interface GeoHierarchy {
 export interface DataProduct {
   id: string;
   title: string;
-  category: 'Demographics' | 'Labour' | 'Housing' | 'Economy' | 'Health' | 'Education' | 'Transport';
+  category: string; // Changed to string to support dynamic categories from WDS
   description: string;
   variableName: string;
   units: string;
   releaseDate?: string;
   frequency?: 'Monthly' | 'Quarterly' | 'Annual' | 'Occasional';
-  dimensions: 1 | 2 | 3; // 1=Dot, 2=Line, 3=Triangle
+  dimensions: 1 | 2 | 3; 
 }
 
 export interface GeoPoint {
@@ -31,20 +30,14 @@ export interface GeoPoint {
   name: string; 
   lat: number;
   lng: number;
-  
-  // Primary value for legacy glyphs
   value: number; 
   trend: number; 
-  
-  // Multivariable store: { [productId]: value }
   metrics: Record<string, number>;
   parentMetrics?: Record<string, number>;
-  
   category?: string;
   lod: LODLevel;
   postalCode?: string;
   parentId?: string;
-  
   [key: string]: any;
 }
 
@@ -67,4 +60,28 @@ export interface AIConfig {
   provider: 'gemini' | 'ollama';
   ollamaUrl?: string;
   ollamaModel?: string;
+}
+
+// --- WDS Specific Types ---
+
+export interface WDSCubeLite {
+  productId: number;
+  cubeTitleEn: string;
+  releaseTime: string;
+  subjectCode: string[];
+}
+
+export interface WDSCodeSet {
+  scalarFactorCode: number;
+  scalarFactorDescEn: string;
+  frequencyCode: number;
+  frequencyDescEn: string;
+  // Add others as needed
+}
+
+export interface LoadingTask {
+  id: string;
+  message: string;
+  progress?: number; // 0 to 100
+  type: 'info' | 'success' | 'error';
 }

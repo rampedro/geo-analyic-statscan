@@ -1,6 +1,5 @@
-import { GeoHierarchy, DataProduct, GeoPoint, LODLevel } from "../types";
+import { DataProduct, GeoPoint, LODLevel, WDSCubeLite } from "../types";
 
-// Corrected Raw GitHub URLs
 const GEOJSON_SOURCES: Record<LODLevel, string> = {
   'PROVINCE': 'https://raw.githubusercontent.com/rampedro/ShinyR-d3/main/canada.geojson',
   'CMA': 'https://raw.githubusercontent.com/rampedro/ShinyR-d3/main/CMCA.geojson',
@@ -10,21 +9,30 @@ const GEOJSON_SOURCES: Record<LODLevel, string> = {
   'DA': 'https://raw.githubusercontent.com/rampedro/ShinyR-d3/main/updated_swo_dissemination_area.geojson'
 };
 
-// StatCan Web Data Service (WDS) Endpoint
 const STATCAN_API_URL = 'https://www150.statcan.gc.ca/t1/wds/rest';
 
+// Static fallback catalog with Real PIDs
 const CATALOG: DataProduct[] = [
-  { id: '98100001', title: 'Population Counts', category: 'Demographics', variableName: 'Population', units: 'people', description: '2021 Census.', dimensions: 1 },
-  { id: '14100287', title: 'Unemployment Rate', category: 'Labour', variableName: 'Unemployment', units: '%', description: 'Monthly LFS.', dimensions: 2 },
+  { id: '98100001', title: 'Population Counts (Census)', category: 'Demographics', variableName: 'Population', units: 'people', description: '2021 Census.', dimensions: 1 },
+  { id: '14100287', title: 'Unemployment Rate (LFS)', category: 'Labour', variableName: 'Unemployment', units: '%', description: 'Monthly LFS.', dimensions: 2 },
   { id: '18100205', title: 'New Housing Price Index', category: 'Housing', variableName: 'Price Index', units: 'Index', description: 'Monthly.', dimensions: 3 },
-  { id: '18100004', title: 'CPI (Inflation)', category: 'Economy', variableName: 'CPI', units: 'Index', description: 'Consumer Price Index.', dimensions: 2 },
-  { id: '13100096', title: 'Health Perception', category: 'Health', variableName: 'Health Score', units: '%', description: 'Self-perceived health.', dimensions: 1 },
+  { id: '18100004', title: 'Consumer Price Index (CPI)', category: 'Economy', variableName: 'CPI', units: 'Index', description: 'Inflation.', dimensions: 2 },
+  { id: '13100096', title: 'Perceived Health (CCHS)', category: 'Health', variableName: 'Health Score', units: '%', description: 'Self-perceived health.', dimensions: 1 },
 ];
 
 export class StatCanService {
   private cache: Record<string, any> = {};
   private productMetadataCache: Record<string, any> = {};
+  private baselineCache: Record<string, number> = {}; // Cache for real data values
+  private scalarCodes: Record<number, number> = {}; 
+  private fullCubeList: WDSCubeLite[] | null = null;
   
+  constructor() {
+      // Initialize scalar codes (default to units)
+      this.scalarCodes[0] = 1;
+  }
+
+  // --- GEOMETRY UTILS ---
   private getCentroid(geometry: any): [number, number] | null {
     if (!geometry || !geometry.coordinates) return null;
     let polygon = geometry.coordinates;
@@ -68,96 +76,137 @@ export class StatCanService {
       const chars = "ABCEGHJKLMNPRSTVXY";
       const nums = "0123456789";
       const hash = Math.abs(Math.sin(lat * 1000) * Math.cos(lng * 1000) * 10000);
-      const idx1 = Math.floor(hash % chars.length);
-      const idx2 = Math.floor((hash * 10) % nums.length);
-      const idx3 = Math.floor((hash * 100) % chars.length);
-      const idx4 = Math.floor((hash * 1000) % nums.length);
-      const idx5 = Math.floor((hash * 10000) % chars.length);
-      const idx6 = Math.floor((hash * 100000) % nums.length);
-      
-      return `${chars[idx1]}${nums[idx2]}${chars[idx3]} ${nums[idx4]}${chars[idx5]}${nums[idx6]}`;
+      return `${chars[Math.floor(hash % 18)]}${nums[Math.floor((hash*10) % 10)]}${chars[Math.floor((hash*100) % 18)]} ${nums[Math.floor((hash*1000) % 10)]}${chars[Math.floor((hash*10000) % 18)]}${nums[Math.floor((hash*100000) % 10)]}`;
   }
 
-  // --- STATCAN API METHODS ---
+  // --- WDS API METHODS ---
 
-  async fetchCubeMetadata(productId: string): Promise<any> {
-    if (this.productMetadataCache[productId]) return this.productMetadataCache[productId];
-    try {
-      const response = await fetch(`${STATCAN_API_URL}/getCubeMetadata`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ productId: parseInt(productId) }])
-      });
-      const data = await response.json();
-      if (data[0] && data[0].status === "SUCCESS") {
-        this.productMetadataCache[productId] = data[0].object;
-        return data[0].object;
+  async fetchCodeSets(): Promise<void> {
+      try {
+          const res = await fetch(`${STATCAN_API_URL}/getCodeSets`);
+          const json = await res.json();
+          if (json.status === 'SUCCESS' && json.object.scalar) {
+              json.object.scalar.forEach((s: any) => {
+                  let factor = 1;
+                  const desc = s.scalarFactorDescEn.toLowerCase();
+                  if (desc.includes('thousands')) factor = 1000;
+                  else if (desc.includes('millions')) factor = 1000000;
+                  else if (desc.includes('billions')) factor = 1000000000;
+                  else if (desc.includes('hundreds')) factor = 100;
+                  this.scalarCodes[s.scalarFactorCode] = factor;
+              });
+          }
+      } catch (e) {
+          console.warn("Failed to fetch CodeSets, defaulting to units.");
       }
-    } catch (e) {
-      console.warn(`Failed to fetch metadata for ${productId}`, e);
-    }
-    return null;
   }
 
+  // Get the real value for the latest period.
   async fetchLiveBaseline(productId: string): Promise<number | null> {
+    if (this.baselineCache[productId]) return this.baselineCache[productId];
+
+    // Ensure scalar codes are loaded
+    if (Object.keys(this.scalarCodes).length === 1) await this.fetchCodeSets();
+
     try {
-        const response = await fetch(`${STATCAN_API_URL}/getDataFromCubePid`, {
+        const response = await fetch(`${STATCAN_API_URL}/getDataFromCubePidCoordAndLatestNPeriods`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify([{ 
                 productId: parseInt(productId), 
-                coordinate: "1.1.1.1.1.1.1.1.1.1", 
+                coordinate: "1.1.1.1.1.1.1.1.1.1", // Generic 'Canada' or top-level coordinate for this cube
                 latestN: 1 
             }])
         });
         const data = await response.json();
+        
         if (data[0] && data[0].status === "SUCCESS" && data[0].object.vectorDataPoint.length > 0) {
-            return data[0].object.vectorDataPoint[0].value;
+            const point = data[0].object.vectorDataPoint[0];
+            const scalar = this.scalarCodes[point.scalarFactorCode] || 1;
+            const val = point.value * scalar;
+            this.baselineCache[productId] = val; // CACHE IT
+            return val;
         }
     } catch (e) {
-        // Fallback silently
+        console.warn(`WDS Live fetch failed for ${productId}`);
     }
     return null;
+  }
+
+  async fetchAllCubesList(): Promise<void> {
+      if (this.fullCubeList) return;
+      try {
+          const res = await fetch(`${STATCAN_API_URL}/getAllCubesListLite`);
+          const json = await res.json();
+          if (Array.isArray(json)) {
+             this.fullCubeList = json;
+          }
+      } catch (e) {
+          console.error("Failed to fetch full cube list", e);
+      }
+  }
+
+  async searchProducts(query: string, categoryFilter?: string): Promise<DataProduct[]> {
+    // 1. Search Static Catalog first
+    const staticResults = CATALOG.filter(p => {
+      const matchesQuery = !query || p.title.toLowerCase().includes(query.toLowerCase());
+      const matchesCat = !categoryFilter || p.category === categoryFilter;
+      return matchesQuery && matchesCat;
+    });
+
+    if (staticResults.length > 0) return staticResults;
+
+    // 2. If no static results, check Full Cube List
+    if (!this.fullCubeList) {
+        await this.fetchAllCubesList();
+    }
+
+    if (this.fullCubeList) {
+        const wdsResults = this.fullCubeList
+            .filter(c => c.cubeTitleEn.toLowerCase().includes(query.toLowerCase()))
+            .slice(0, 10)
+            .map(c => ({
+                id: c.productId.toString(),
+                title: c.cubeTitleEn,
+                category: 'General',
+                variableName: 'Value',
+                units: 'Units',
+                description: `Released: ${c.releaseTime}`,
+                dimensions: 1 as 1|2|3
+            }));
+        return wdsResults;
+    }
+
+    return [];
   }
 
   // --- MAP DATA METHODS ---
 
   private isPointInBounds(lat: number, lng: number, bounds: {north: number, south: number, east: number, west: number}): boolean {
-      // Add a 20% buffer to bounds to ensure valid loading even if viewport is slightly off
       const latBuf = (bounds.north - bounds.south) * 0.2;
       const lngBuf = (bounds.east - bounds.west) * 0.2;
       return lat <= bounds.north + latBuf && lat >= bounds.south - latBuf && 
              lng <= bounds.east + lngBuf && lng >= bounds.west - lngBuf;
   }
 
-  async fetchGeoJSON(level: LODLevel): Promise<any> {
-      const url = GEOJSON_SOURCES[level];
-      if (this.cache[url]) return this.cache[url];
-
-      try {
-          const res = await fetch(url);
-          const data = await res.json();
-          this.cache[url] = data;
-          return data;
-      } catch (e) {
-          console.error(`Failed to load GeoJSON for ${level}`, e);
-          return { type: "FeatureCollection", features: [] };
-      }
-  }
-
   async fetchCanadaGeoJSON(): Promise<any> {
       return this.fetchGeoJSON('PROVINCE');
   }
+  
+  async fetchGeoJSON(level: LODLevel): Promise<any> {
+      const url = GEOJSON_SOURCES[level];
+      if (this.cache[url]) return this.cache[url];
+      const res = await fetch(url);
+      const data = await res.json();
+      this.cache[url] = data;
+      return data;
+  }
 
-  // STREAMING GENERATOR: Yields chunks of features to the UI
+  // Separated Geometry Loading
   async *streamShapes(level: LODLevel, bounds: any): AsyncGenerator<any[], void, unknown> {
     const url = GEOJSON_SOURCES[level];
-    if (!url) {
-        console.warn(`No URL defined for level ${level}`);
-        return;
-    }
+    if (!url) return;
     
-    // 1. Get Data (Cached or Network)
     let data = this.cache[url];
     if (!data) {
         try {
@@ -165,132 +214,88 @@ export class StatCanService {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             data = await res.json();
             this.cache[url] = data;
-        } catch(e) { 
-            console.error(`Fetch failed for ${url}`, e); 
-            return; 
-        }
+        } catch(e) { return; }
     }
 
     const features = data.features || [];
-    const CHUNK_SIZE = 100; // Increased chunk size for faster loading
+    const CHUNK_SIZE = 100; // Increased chunk size for speed
     let chunk: any[] = [];
     
-    // 2. Iterate and Filter
     for (const f of features) {
-        // Basic geometry check
         if (!f.geometry) continue;
-        
         const centroid = this.getCentroid(f.geometry);
-        
-        // If it's the CCS level, sometimes bounds checking is tricky due to huge shapes.
-        // We ensure we load if the shape is even roughly near.
         if (centroid && this.isPointInBounds(centroid[0], centroid[1], bounds)) {
-             
-             // Repair IDs if missing
              if (!f.properties.id) {
                  const props = f.properties;
                  f.properties.id = props.DAUID || props.CFSAUID || props.CCSUID || props.CDUID || props.CMAUID || props.PRUID || `gen-${Math.random().toString(36).substr(2,9)}`;
              }
              chunk.push(f);
         }
-
-        // 3. Yield Chunk
         if (chunk.length >= CHUNK_SIZE) {
             yield chunk;
             chunk = [];
-            // Reduced delay
-            await new Promise(r => setTimeout(r, 5)); 
+            // Use setTimeout to yield to main thread, but with minimal delay
+            await new Promise(r => setTimeout(r, 0)); 
         }
     }
-    
-    // Yield remaining
     if (chunk.length > 0) yield chunk;
   }
 
-  // Helper to attach data to a shape
-  async enrichFeature(feature: any, products: DataProduct[], level: LODLevel, baselines: Record<string, number>): Promise<GeoPoint | null> {
+  // New Method: Just process geometry into a lightweight point
+  processGeometry(feature: any, level: LODLevel): GeoPoint | null {
       const centroid = this.getCentroid(feature.geometry);
       if (!centroid) return null;
       const [lat, lng] = centroid;
       const props = feature.properties;
-
       const id = props.id;
       const name = props.name || props.PRNAME || props.MANAME || props.CDNAME || props.CCSNAME || props.DAUID || id;
-      const postalCode = this.generatePostalCode(lat, lng);
-
-      const featureMetrics: Record<string, number> = {};
-      const parentMetrics: Record<string, number> = {};
-      
-      // Calculate Metrics
-      products.forEach(product => {
-          const baseVal = baselines[product.id] || 100;
-          const seed = product.category.length * 137; 
-          
-          let freq = 100;
-          if (level === 'DA') freq = 120;
-          else if (level === 'FSA') freq = 60;
-          else if (level === 'CCS') freq = 30;
-          else if (level === 'CD') freq = 15;
-          else if (level === 'CMA') freq = 8;
-          else if (level === 'PROVINCE') freq = 4;
-
-          const n1 = Math.sin(lat * freq + seed) * Math.cos(lng * freq + seed);
-          const pFreq = freq * 0.2; 
-          const p1 = Math.sin(lat * pFreq + seed) * Math.cos(lng * pFreq + seed);
-
-          let finalVal = baseVal;
-          let parentVal = baseVal;
-
-          if (product.category === 'Housing') {
-              finalVal = baseVal * (1 + n1 * 0.25); 
-              parentVal = baseVal * (1 + p1 * 0.1); 
-          } else {
-              finalVal = baseVal * (1 + n1 * 0.18);
-              parentVal = baseVal * (1 + p1 * 0.05);
-          }
-          
-          featureMetrics[product.id] = finalVal;
-          parentMetrics[product.id] = parentVal;
-      });
 
       return {
           id,
           name,
           lat,
           lng,
-          value: featureMetrics[products[0]?.id] || 0,
-          metrics: featureMetrics,
-          parentMetrics: parentMetrics, 
-          trend: Math.sin(lat * lng * 1000), 
-          category: products[0]?.category,
+          value: 0,
+          metrics: {},
+          trend: 0,
           lod: level,
-          postalCode
+          postalCode: this.generatePostalCode(lat, lng)
       };
   }
 
-  async fetchBaselines(products: DataProduct[]): Promise<Record<string, number>> {
-    const baselines: Record<string, number> = {};
-    await Promise.all(products.map(async (p) => {
-        const liveVal = await this.fetchLiveBaseline(p.id);
-        if (liveVal) {
-            baselines[p.id] = liveVal;
-        } else {
-            // Fallbacks
-            if (p.category === 'Housing') baselines[p.id] = 125.5; 
-            else if (p.category === 'Labour') baselines[p.id] = 6.1; 
-            else if (p.category === 'Demographics') baselines[p.id] = 5000;
-            else baselines[p.id] = 100;
-        }
-    }));
-    return baselines;
-  }
+  // New Method: Fetch and calculate metrics for points (Cached)
+  async getMetricsForPoints(points: GeoPoint[], products: DataProduct[]): Promise<void> {
+      // 1. Prefetch all baselines in parallel
+      const baselines: Record<string, number> = {};
+      await Promise.all(products.map(async (p) => {
+          const liveVal = await this.fetchLiveBaseline(p.id);
+          // Fallback if live fetch fails, but prioritize live
+          if (liveVal !== null) baselines[p.id] = liveVal;
+          else baselines[p.id] = p.category === 'Housing' ? 125.5 : p.category === 'Labour' ? 6.1 : 1000;
+      }));
 
-  async searchProducts(query: string, categoryFilter?: string): Promise<DataProduct[]> {
-    return CATALOG.filter(p => {
-      const matchesQuery = !query || p.title.toLowerCase().includes(query.toLowerCase());
-      const matchesCat = !categoryFilter || p.category === categoryFilter;
-      return matchesQuery && matchesCat;
-    });
+      // 2. Apply to points (Simulation of local variation based on Real National Baseline)
+      // Note: In a real production app, we would query `getDataFromVectorsAndLatestNPeriods` for specific IDs here.
+      // Since we lack a DAUID->VectorID lookup, we simulate local distribution around the REAL national mean.
+      
+      points.forEach(point => {
+          products.forEach(product => {
+             // Only calculate if not already present
+             if (point.metrics[product.id] === undefined) {
+                 const baseVal = baselines[product.id];
+                 const seed = product.category.length * 137; 
+                 const freq = point.lod === 'DA' ? 120 : 4;
+                 const n1 = Math.sin(point.lat * freq + seed) * Math.cos(point.lng * freq + seed);
+                 
+                 point.metrics[product.id] = Math.max(0, baseVal * (1 + n1 * 0.2));
+             }
+          });
+          // Update display value to the first active product
+          if (products.length > 0) {
+              point.value = point.metrics[products[0].id];
+              point.category = products[0].category;
+          }
+      });
   }
 }
 

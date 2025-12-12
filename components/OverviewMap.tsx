@@ -36,7 +36,7 @@ const OverviewMap: React.FC<OverviewMapProps> = ({ viewState, data, shapeData, a
   return (
     <div className="w-48 h-48 rounded-lg overflow-hidden border-2 border-gray-700 shadow-2xl relative">
       <DeckGL
-        viewState={overviewViewState}
+        viewState={overviewViewState as any}
         layers={layers}
         controller={false} // No interaction on minimap
       >

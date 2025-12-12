@@ -1,126 +1,177 @@
 import React, { useRef, useEffect, useState } from 'react';
 import * as d3 from 'd3';
-import { GeoPoint, LODLevel } from '../types';
+import { GeoPoint, LODLevel, DataProduct } from '../types';
 
 interface ComparisonChartProps {
-  data: GeoPoint[];
-  color: [number, number, number];
-  unit: string;
+  data: GeoPoint[]; // The visible points
+  products: DataProduct[];
   lod: LODLevel;
   selectedIds: string[];
 }
 
-const ComparisonChart: React.FC<ComparisonChartProps> = ({ data, color, unit, lod, selectedIds }) => {
+const ComparisonChart: React.FC<ComparisonChartProps> = ({ data, products, lod, selectedIds }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 0, height: 200 });
+  const [dimensions, setDimensions] = useState({ width: 0, height: 250 });
 
-  // Handle Resize
   useEffect(() => {
     const handleResize = () => {
         if (containerRef.current) {
             setDimensions({
                 width: containerRef.current.clientWidth,
-                height: 200
+                height: 250
             });
         }
     };
-    
     window.addEventListener('resize', handleResize);
-    handleResize(); // Initial
-    
+    handleResize();
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   useEffect(() => {
-    if (!data || !svgRef.current || dimensions.width === 0) return;
+    if (!data || data.length === 0 || !svgRef.current || dimensions.width === 0) return;
 
-    // Filter and Sort Data
-    let chartData = [...data];
-    if (selectedIds.length > 0) {
-      chartData = data.filter(d => selectedIds.includes(d.id));
-    }
-    // Sort by value desc
-    chartData.sort((a, b) => b.value - a.value);
+    // --- HOTSPOT SCORING ALGORITHM ---
     
-    // Limit to top 50 if too many
-    if (selectedIds.length === 0) {
-        chartData = chartData.slice(0, 50);
+    // 1. Define Directionality
+    // Metrics where Lower is Better
+    const invertedMetrics = ['Housing', 'Crime', 'Unemployment'];
+    
+    // 2. Normalize and Score
+    const scoredData = data.map(point => {
+        let totalScore = 0;
+        let validMetrics = 0;
+
+        products.forEach(prod => {
+            // Find Min/Max for this product across all visible data
+            const values = data.map(d => d.metrics[prod.id] || 0);
+            const min = d3.min(values) || 0;
+            const max = d3.max(values) || 1; // avoid divide by zero
+            
+            const rawVal = point.metrics[prod.id] || 0;
+            let norm = (rawVal - min) / (max - min); // 0 to 1
+
+            // Invert if necessary (e.g. Price)
+            if (invertedMetrics.includes(prod.category)) {
+                norm = 1 - norm;
+            }
+
+            totalScore += norm;
+            validMetrics++;
+        });
+
+        const finalScore = validMetrics > 0 ? (totalScore / validMetrics) * 100 : 0;
+        return { ...point, finalScore };
+    });
+
+    // 3. Sort by Score
+    let chartData = scoredData.sort((a, b) => b.finalScore - a.finalScore);
+    
+    // 4. Filter if selected
+    if (selectedIds.length > 0) {
+        const selectedSet = chartData.filter(d => selectedIds.includes(d.id));
+        // If selection exists, show them at top, plus some context neighbors
+        if (selectedSet.length > 0) chartData = selectedSet; 
+    } else {
+        // Show top 20
+        chartData = chartData.slice(0, 20);
     }
 
-    const margin = { top: 20, right: 10, bottom: 20, left: 35 };
+    // --- D3 RENDERING ---
+
+    const margin = { top: 30, right: 20, bottom: 20, left: 100 }; // More left margin for names
     const innerWidth = dimensions.width - margin.left - margin.right;
     const innerHeight = dimensions.height - margin.top - margin.bottom;
 
     const svg = d3.select(svgRef.current);
-    svg.selectAll("*").remove(); // Clear previous
+    svg.selectAll("*").remove();
 
     const g = svg.append("g")
         .attr("transform", `translate(${margin.left},${margin.top})`);
 
-    // Scales
-    const x = d3.scaleBand()
-        .range([0, innerWidth])
+    // X Scale (Score)
+    const x = d3.scaleLinear()
+        .domain([0, 100])
+        .range([0, innerWidth]);
+
+    // Y Scale (Items)
+    const y = d3.scaleBand()
+        .range([0, innerHeight])
         .domain(chartData.map(d => d.id))
-        .padding(0.3);
+        .padding(0.2);
 
-    const y = d3.scaleLinear()
-        .range([innerHeight, 0])
-        .domain([0, d3.max(chartData, d => d.value) || 100]);
-
-    // Axes
-    // Y Axis
-    g.append("g")
-        .call(d3.axisLeft(y).ticks(5).tickFormat(d => d3.format(".2s")(d)))
-        .call(g => g.select(".domain").remove())
-        .call(g => g.selectAll(".tick line").attr("stroke", "#334155").attr("stroke-dasharray", "2,2"))
-        .call(g => g.selectAll(".tick text").attr("fill", "#94a3b8").style("font-size", "9px"));
+    // Color Scale based on Score
+    const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, 100]);
 
     // Bars
-    const cssColor = `rgb(${color.join(',')})`;
-    
     g.selectAll(".bar")
         .data(chartData)
         .enter().append("rect")
         .attr("class", "bar")
-        .attr("x", d => x(d.id) || 0)
-        .attr("y", innerHeight) // Animate from bottom
-        .attr("width", x.bandwidth())
-        .attr("height", 0)
-        .attr("fill", cssColor)
-        .attr("rx", 2)
-        .on("mouseover", function() {
-            d3.select(this).attr("opacity", 0.7);
-        })
-        .on("mouseout", function() {
-            d3.select(this).attr("opacity", 1);
-        })
+        .attr("x", 0)
+        .attr("y", d => y(d.id) || 0)
+        .attr("width", 0) // Animate from 0
+        .attr("height", y.bandwidth())
+        .attr("fill", d => colorScale(d.finalScore))
+        .attr("rx", 3)
         .transition()
         .duration(800)
-        .ease(d3.easeCubicOut)
-        .attr("y", d => y(d.value))
-        .attr("height", d => innerHeight - y(d.value));
+        .attr("width", d => x(d.finalScore));
 
-    // Axis Label (Unit)
-    g.append("text")
-       .attr("x", -margin.left + 10)
-       .attr("y", -5)
-       .text(unit)
-       .attr("fill", "#64748b")
-       .style("font-size", "10px");
+    // Labels (Names)
+    g.selectAll(".label")
+        .data(chartData)
+        .enter().append("text")
+        .attr("x", -10)
+        .attr("y", d => (y(d.id) || 0) + y.bandwidth() / 2)
+        .attr("dy", ".35em")
+        .attr("text-anchor", "end")
+        .text(d => (d.name || d.id).substring(0, 15))
+        .style("fill", "#94a3b8")
+        .style("font-size", "10px")
+        .style("font-family", "monospace");
 
-  }, [data, color, selectedIds, dimensions]);
+    // Score Text on Bar
+    g.selectAll(".score-text")
+        .data(chartData)
+        .enter().append("text")
+        .attr("x", d => x(d.finalScore) + 5)
+        .attr("y", d => (y(d.id) || 0) + y.bandwidth() / 2)
+        .attr("dy", ".35em")
+        .text(d => d.finalScore.toFixed(1))
+        .style("fill", "#fff")
+        .style("font-size", "9px")
+        .style("opacity", 0)
+        .transition()
+        .delay(500)
+        .style("opacity", 1);
+
+    // Top Axis (Grid)
+    g.append("g")
+        .call(d3.axisTop(x).ticks(5))
+        .call(g => g.select(".domain").remove())
+        .call(g => g.selectAll(".tick line").attr("stroke", "#334155"))
+        .call(g => g.selectAll(".tick text").attr("fill", "#64748b"));
+
+  }, [data, products, selectedIds, dimensions]);
 
   return (
-    <div ref={containerRef} className="w-full mt-4 bg-gray-900/90 rounded-lg p-3 border border-gray-700 backdrop-blur-md shadow-2xl">
-      <div className="flex justify-between items-center mb-2">
-        <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-          {selectedIds.length > 0 ? 'Analysis (Selected)' : 'Top 50 Hotspots'}
-        </h3>
-        <span className="text-xs text-primary font-mono">{data.length > 50 && selectedIds.length === 0 ? '50 displayed' : data.length + ' pts'}</span>
+    <div ref={containerRef} className="w-full mt-4 bg-gray-900/95 rounded-xl p-4 border border-gray-700 backdrop-blur-md shadow-2xl">
+      <div className="flex justify-between items-center mb-1">
+        <div>
+            <h3 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                <span className="text-secondary">✦</span> Hotspot Ranker
+            </h3>
+            <p className="text-[10px] text-gray-500">
+                Composite Score: {products.map(p => p.category).join(' + ')}
+            </p>
+        </div>
+        <div className="text-right">
+             <div className="text-xl font-mono text-primary font-bold">{data.length}</div>
+             <div className="text-[9px] text-gray-500 uppercase">Visible Areas</div>
+        </div>
       </div>
       <svg ref={svgRef} width={dimensions.width} height={dimensions.height}></svg>
-      <div className="text-[9px] text-gray-600 mt-1 text-right">D3.js Visualization</div>
     </div>
   );
 };
