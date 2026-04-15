@@ -22,3 +22,18 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+python-env/
+.env*
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
