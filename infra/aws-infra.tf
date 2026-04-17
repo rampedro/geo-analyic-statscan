@@ -75,9 +75,9 @@ resource "aws_msk_cluster" "kafka" {
   number_of_broker_nodes = 3
 
   broker_node_group_info {
-    instance_type = "kafka.m5.large"
-    client_subnets = ["subnet-abc123", "subnet-def456"]
-    security_groups = ["sg-xyz123"]
+    instance_type = var.msk_instance_type
+    client_subnets = var.subnet_ids
+    security_groups = var.security_group_ids
   }
 }
 
@@ -88,16 +88,16 @@ resource "aws_emr_cluster" "spark_job" {
   service_role  = "EMR_DefaultRole"
   ec2_attributes {
     instance_profile = "EMR_EC2_DefaultRole"
-    subnet_id        = "subnet-abc123"
+    subnet_id        = var.subnet_ids[0]
   }
 
   master_instance_group {
-    instance_type = "m5.xlarge"
+    instance_type = var.emr_instance_type
     instance_count = 1
   }
 
   core_instance_group {
-    instance_type = "m5.xlarge"
+    instance_type = var.emr_instance_type
     instance_count = 2
   }
 }

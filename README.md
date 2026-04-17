@@ -16,10 +16,15 @@ This repo demonstrates a distributed heterogeneous analytics platform with full 
 - Backend sample microservices in FastAPI for ingestion, Kafka publishing, and metadata lookup
 - Kafka producer/consumer examples for event-driven streaming
 - Spark ETL sample for batch processing and S3 lakehouse writes
-- SageMaker training example and Bedrock inference sample
-- Infrastructure template for AWS resources in `infra/aws-infra.tf`
+- SageMaker training example, TensorFlow/PyTorch models, and MLOps pipelines
+- Bedrock inference sample for generative AI analytics summaries
+- Power BI and Microsoft Fabric integration services
+- Infrastructure template for AWS resources (EMR, MSK, S3, Glue, DynamoDB, SageMaker)
+- Docker and docker-compose for local development
+- CI/CD pipeline with GitHub Actions
+- Comprehensive testing (frontend and backend)
+- Security, monitoring, and API documentation
 - Architecture and deployment docs in `docs/`
-- Documentation panel within the app to surface architecture and platform guidance
 
 ## Repository Structure
 - `App.tsx`, `components/`: Frontend dashboard and UI panels
